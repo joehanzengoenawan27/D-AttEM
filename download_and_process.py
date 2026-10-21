@@ -44,11 +44,7 @@ def download_from_uci(name):
     else:
         print('Aready downloaded.')
 
-def process_adult():
-    data_dir = f'{DATA_DIR}/adult'
-    df = pd.read_csv(f'{data_dir}/adult.data', header=None)
-    df.columns = ['age', 'workclass', 'fnlwgt', 'education', 'education-num', 'marital-status', 'occupation', 'relationship', ]
-                  
+                 
 def process_gesture():
 
     file_names = ['a1_va3', 'a2_va3', 'a3_va3', 'b1_va3', 'b3_va3', 'c1_va3', 'c3_va3']
@@ -228,12 +224,3 @@ if __name__ == '__main__':
                                 p = mask_p,
                                 )
     
-    name = 'adult'
-    for mask_type in ['MCAR', 'MAR', 'MNAR_logistic_T2']:
-        for mask_p in [0.3]:
-            
-            generate_mask(dataname = name,
-                            mask_type = mask_type,
-                            mask_num = 10,
-                            p = mask_p,
-                            )

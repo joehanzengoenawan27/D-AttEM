@@ -112,7 +112,7 @@ class MLPDiffusion(nn.Module):
         # 1. Feature Tokenizer: independently map each of the d_in features to d_model
         # We use a weight matrix of [d_in, d_model] and bias [d_in, d_model]
         self.feature_weights = nn.Parameter(torch.randn(d_in, d_model) * 0.02)
-        self.feature_biases = nn.Parameter(torch.zeros(d_in, d_model))
+        self.feature_biases = nn.Parameter(torch.randn(d_in, d_model) * 0.02)
 
         # 2. Time Embedding layers
         self.map_noise = PositionalEmbedding(num_channels=dim_t)

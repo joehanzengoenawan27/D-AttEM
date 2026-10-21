@@ -70,8 +70,7 @@ def load_dataset(dataname, idx = 0, mask_type = 'MCAR', ratio = '30'):
 
     else:
 
-        if not os.path.exists(f'{data_dir}/{cat_columns[0]}_map.json'):
-
+        if not os.path.exists(f'{data_dir}/{cat_columns[0]}_map_idx.json'):
             for column in cat_columns:
                 map_path_bin = f'{data_dir}/{column}_map_bin.json'
                 map_path_idx = f'{data_dir}/{column}_map_idx.json'

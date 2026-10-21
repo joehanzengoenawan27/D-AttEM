@@ -50,7 +50,7 @@ parser.add_argument('--max_iter', type=int, default=5, help='Maximum iteration.'
 parser.add_argument('--ratio', type=str, default=30, help='Masking ratio.')
 parser.add_argument('--hid_dim', type=int, default=1024, help='Hidden dimension.')
 parser.add_argument('--mask', type=str, default='MCAR', help='Masking machenisms.')
-parser.add_argument('--num_trials', type=int, default=20, help='Number of sampling times.')
+parser.add_argument('--num_trials', type=int, default=10, help='Number of sampling times.')
 parser.add_argument('--num_steps', type=int, default=50, help='Number of diffusion steps.')
 parser.add_argument('--d_model', type=int, default=32, help='Transformer hidden dimension.')
 parser.add_argument('--nhead', type=int, default=4, help='Number of attention heads.')
@@ -153,10 +153,10 @@ if __name__ == '__main__':
         model = Model(denoise_fn = denoise_fn, hid_dim = in_dim).to(device)
 
                 # === TAMBAHAN MULTI-GPU UNTUK TRAINING ===
-        if torch.cuda.device_count() > 1:
-            if iteration == 0: # Print hanya sekali
-                print(f"Menggunakan {torch.cuda.device_count()} GPUs untuk Training!")
-            model = torch.nn.DataParallel(model)
+        # if torch.cuda.device_count() > 1:
+        #     if iteration == 0: # Print hanya sekali
+        #         print(f"Menggunakan {torch.cuda.device_count()} GPUs untuk Training!")
+        #     model = torch.nn.DataParallel(model)
         # =========================================
 
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=0)
@@ -214,6 +214,23 @@ if __name__ == '__main__':
 
         # In-sample imputation
 
+        
+        in_dim = X.shape[1]
+
+        denoise_fn = MLPDiffusion(
+            d_in=in_dim, 
+            dim_t=hid_dim, 
+            d_model=args.d_model, 
+            nhead=args.nhead, 
+            num_layers=args.num_layers, variant=args.variant
+        ).to(device)
+
+        model = Model(denoise_fn = denoise_fn, hid_dim = in_dim).to(device)
+        model.load_state_dict(torch.load(f'{ckpt_dir}/{iteration}/model.pt'))
+        model.eval()
+
+        net = model.denoise_fn_D
+
         rec_Xs = []
 
         for trial in tqdm(range(num_trials), desc='In-sample imputation'):
@@ -222,25 +239,10 @@ if __name__ == '__main__':
             X_miss = X_miss.to(device)
             impute_X = X_miss
   
-            in_dim = X.shape[1]
 
-            denoise_fn = MLPDiffusion(
-                d_in=in_dim, 
-                dim_t=hid_dim, 
-                d_model=args.d_model, 
-                nhead=args.nhead, 
-                num_layers=args.num_layers, variant=args.variant
-            ).to(device)
-
-            model = Model(denoise_fn = denoise_fn, hid_dim = in_dim).to(device)
-            model.load_state_dict(torch.load(f'{ckpt_dir}/{iteration}/model.pt'))
-
-            # ==========================================================
-
-            net = model.denoise_fn_D
             # === TAMBAHAN MULTI-GPU UNTUK IMPUTASI ===
-            if torch.cuda.device_count() > 1:
-                net = DPWrapper(net)
+            # if torch.cuda.device_count() > 1:
+            #     net = DPWrapper(net)
             # =========================================
             
             num_samples, dim = X.shape[0], X.shape[1]
@@ -279,37 +281,16 @@ if __name__ == '__main__':
         rec_Xs = []
 
         for trial in tqdm(range(num_trials), desc='Out-of-sample imputation'):
-            
+
             # For out-of-sample imputation, no results from previous iterations are used
 
             X_miss = (1. - mask_test.float()) * X_test
             X_miss = X_miss.to(device)
             impute_X = X_miss
 
-            in_dim = X_test.shape[1]
-
-            denoise_fn = MLPDiffusion(
-                d_in=in_dim, 
-                dim_t=hid_dim, 
-                d_model=args.d_model, 
-                nhead=args.nhead, 
-                num_layers=args.num_layers, variant=args.variant
-            ).to(device)
-
-            model = Model(denoise_fn = denoise_fn, hid_dim = in_dim).to(device)
-            model.load_state_dict(torch.load(f'{ckpt_dir}/{iteration}/model.pt'))
-
-            # ==========================================================
-            net = model.denoise_fn_D
-
-            # === TAMBAHAN MULTI-GPU UNTUK IMPUTASI ===
-            if torch.cuda.device_count() > 1:
-                net = DPWrapper(net)
-            # =========================================
-            
             num_samples, dim = X_test.shape[0], X_test.shape[1]
             rec_X = impute_mask(net, impute_X, mask_test, num_samples, dim, num_steps, device)
-            
+
             mask_int = mask_test.to(torch.float).to(device)
             rec_X = rec_X * mask_int + impute_X * (1-mask_int)
             rec_Xs.append(rec_X)

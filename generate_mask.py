@@ -496,7 +496,7 @@ def fit_intercepts(X, coeffs, p, self_mask=False):
     return intercepts
 
 
-def generate_mask(dataname, mask_type, p, mask_num, reproduce=True):
+def generate_mask(dataname, mask_type, p, mask_num, reproduce=False):
 
 
     train_X, test_X = load_dataset(dataname)
@@ -507,10 +507,25 @@ def generate_mask(dataname, mask_type, p, mask_num, reproduce=True):
     if p > 0.3:
         q = 0.1
     
+    folder_name = 'rate' + str(int(p * 100))
+    data_dir = f'{DATA_DIR}/{dataname}/masks/{folder_name}/{mask_type}'
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+
     for mask_idx in range(mask_num):
+        train_mask_path = f'{data_dir}/train_mask_{mask_idx}.npy'
+        test_mask_path = f'{data_dir}/test_mask_{mask_idx}.npy'
+
+        # 1. Cek di awal: jika mask sudah ada dan reproduce=False, langsung lewati
+        if os.path.exists(train_mask_path) and os.path.exists(test_mask_path) and not reproduce:
+            print(f'Masks already exist at {train_mask_path}')
+            continue
+
+        # 2. Kunci seed sesuai nomor indeks mask (0 s.d. 9)
+        np.random.seed(mask_idx)
+        torch.manual_seed(mask_idx)
+
         if mask_type == 'MCAR':
-            #train_mask = (torch.rand(train_X.shape) < p).numpy()
-            #test_mask = (torch.rand(test_X.shape) < p).numpy()
             train_mask = np.random.rand(*train_X.shape) < p
             test_mask = np.random.rand(*test_X.shape) < p
         elif mask_type == 'MAR':
@@ -519,36 +534,12 @@ def generate_mask(dataname, mask_type, p, mask_num, reproduce=True):
         elif mask_type == 'MNAR_logistic_T2':
             train_mask = MNAR_mask_logistic(train_X, p=p, p_params=q, exclude_inputs=True)
             test_mask = MNAR_mask_logistic(test_X, p=p, p_params=q, exclude_inputs=True)
-        # elif mask_type == 'MNAR_logistic_T1':
-        #     train_mask = MNAR_mask_logistic(train_X, p=0.3, p_obs=0.3, exclude_inputs=False)
-        #     test_mask = MNAR_mask_logistic(test_X, p=0.3, p_obs=0.3, exclude_inputs=False)
-        # elif mask_type == 'MNAR_self_logistic':
-        #     train_mask = MNAR_self_mask_logistic(train_X, p=0.3)
-        #     test_mask = MNAR_self_mask_logistic(test_X, p=0.3)
-        # elif mask_type == 'MNAR_quantiles':
-        #     train_mask = MNAR_mask_quantiles(train_X, 0.3, 0.25, 0.3, cut='both', MCAR=False)
-        #     test_mask = MNAR_mask_quantiles(test_X, 0.3, 0.25, 0.3, cut='both', MCAR=False)
         else:
             raise ValueError('Invalid mask type, please choose from MCAR, MAR, MNAR_logistic_T2')
-        
+
         row, col = train_mask.shape
         print('train_mask missing prob:', np.sum(train_mask) / (row * col))
-    
-        folder_name = 'rate' + str(int(p * 100))
-      
-        data_dir = f'{DATA_DIR}/{dataname}/masks/{folder_name}/{mask_type}'
-        
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
-        
-        train_mask_path = f'{data_dir}/train_mask_{mask_idx}.npy'
-        test_mask_path = f'{data_dir}/test_mask_{mask_idx}.npy'
-        
-        # If exist, pass
-        if os.path.exists(train_mask_path) and os.path.exists(test_mask_path) and not reproduce:
-            print(f'Masks already exist at {train_mask_path}')
-            continue
-        
+
         # Save train/test masks
         np.save(train_mask_path, train_mask)
         np.save(test_mask_path, test_mask)
@@ -566,4 +557,4 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    generate_mask(args.dataname, args.mask_type, args.mask_num, args.p, args.reproduce)
+    generate_mask(args.dataname, args.mask_type, args.p, args.mask_num, args.reproduce)
