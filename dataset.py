@@ -213,14 +213,20 @@ def get_eval(dataname, X_recon, X_true, truth_cat_idx, num_num, cat_bin_num, mas
         for i in range(num_cat):
             n_bits = cat_bin_num[i]
             pred_bits_cont = cat_pred[:, start_idx : start_idx + n_bits]
-            
-            # Threshold to get binary bits (0 or 1)
-            pred_bits_bin = (pred_bits_cont > 0.5).astype(int)
-            
-            # Convert binary array to integer index
-            powers = 2 ** np.arange(n_bits - 1, -1, -1)
-            pred_idx = (pred_bits_bin * powers).sum(axis=1)
             true_idx = cat_true[:, i]
+            
+            # Cari jumlah kategori sah (maksimum indeks kelas pada kolom ke-i)
+            num_valid_classes = int(true_idx.max()) + 1
+            
+            # Buat matriks kode biner (0/1) hanya untuk kategori yang sah: shape (num_valid_classes, n_bits)
+            valid_indices = np.arange(num_valid_classes)[:, None]
+            bit_shifts = np.arange(n_bits - 1, -1, -1)[None, :]
+            valid_codebook = ((valid_indices >> bit_shifts) & 1).astype(np.float32)
+            
+            # Pilih indeks kategori sah yang memiliki jarak L2 terdekat dengan prediksi kontinu model
+            # pred_bits_cont: (N, 1, n_bits) vs valid_codebook: (1, K, n_bits) -> dists: (N, K)
+            dists = ((pred_bits_cont[:, None, :] - valid_codebook[None, :, :]) ** 2).sum(axis=-1)
+            pred_idx = dists.argmin(axis=1)
             
             if dataname == 'news' and oos == True:
                 mask_i = np.delete(cat_mask[:, i], 6265, axis=0)

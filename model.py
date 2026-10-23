@@ -95,97 +95,138 @@ class FourierEmbedding(torch.nn.Module):
         return x
 
 class MLPDiffusion(nn.Module):
-    def __init__(self, d_in, dim_t=512, d_model=32, nhead=4, num_layers=2, variant='D'):
+    def __init__(self, d_in, dim_t=1024, d_model=32, nhead=4, num_layers=2, variant='D'):
         """
-        variant (untuk studi ablasi):
-          'D' : model saat ini  = tokenizer + self-attention + head flatten MLP
-          'C' : tokenizer + head flatten MLP, TANPA attention (attention -> Identity)
-          'E' : tokenizer + self-attention + head PER-TOKEN (tanpa flatten/MLP besar)
-        Tokenizer, embedding waktu, dan hyperparameter lain identik di semua varian.
+        variant:
+          'base' : Model DiffPuter Asli (Murni MLP tanpa Tokenizer & tanpa Attention)
+          'D'    : Model Modifikasi Utama (Tokenizer + PreNorm Self-Attention + Residual + MLP Head)
+          'C'    : Ablasi C (Tokenizer + MLP Head, TANPA Attention)
+          'E'    : Ablasi E (Tokenizer + PreNorm Self-Attention + Head Per-Token)
         """
         super().__init__()
         self.d_in = d_in
+        self.dim_t = dim_t
         self.d_model = d_model
-        assert variant in ('C', 'D', 'E'), f"variant harus 'C', 'D', atau 'E', bukan {variant!r}"
+        assert variant in ('base', 'C', 'D', 'E'), f"variant harus 'base', 'C', 'D', atau 'E', bukan {variant!r}"
         self.variant = variant
-        
-        # 1. Feature Tokenizer: independently map each of the d_in features to d_model
-        # We use a weight matrix of [d_in, d_model] and bias [d_in, d_model]
+
+        # =====================================================================
+        # CABANG 1: ARSITEKTUR DIFFPUTER ASLI (BASE)
+        # =====================================================================
+        if variant == 'base':
+            self.proj = nn.Linear(d_in, dim_t)
+            self.mlp = nn.Sequential(
+                nn.Linear(dim_t, dim_t * 2),
+                nn.SiLU(),
+                nn.Linear(dim_t * 2, dim_t * 2),
+                nn.SiLU(),
+                nn.Linear(dim_t * 2, dim_t),
+                nn.SiLU(),
+                nn.Linear(dim_t, d_in),
+            )
+            self.map_noise = PositionalEmbedding(num_channels=dim_t)
+            self.time_embed = nn.Sequential(
+                nn.Linear(dim_t, dim_t),
+                nn.SiLU(),
+                nn.Linear(dim_t, dim_t)
+            )
+            return
+
+        # =====================================================================
+        # CABANG 2: ARSITEKTUR MODIFIKASI (VARIAN C, D, E)
+        # =====================================================================
+        # 1. Feature Tokenizer
         self.feature_weights = nn.Parameter(torch.randn(d_in, d_model) * 0.02)
         self.feature_biases = nn.Parameter(torch.randn(d_in, d_model) * 0.02)
 
-        # 2. Time Embedding layers
+        # 2. Time Embedding Layers
         self.map_noise = PositionalEmbedding(num_channels=dim_t)
-        self.time_embed = nn.Sequential(
+        self.time_embed_full = nn.Sequential(
             nn.Linear(dim_t, dim_t),
             nn.SiLU(),
-            nn.Linear(dim_t, d_model) # Project time to d_model so it can be added to tokens
+            nn.Linear(dim_t, dim_t),
+        )
+        self.time_embed_token = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(dim_t, d_model),
         )
 
-        # 3. Transformer Encoder (Self-Attention)
+        # 3. Transformer Encoder (Self-Attention) dengan Pre-Norm
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, 
             nhead=nhead, 
             dim_feedforward=d_model * 2,
             batch_first=True,
             activation='gelu',
-            dropout=0.0
+            dropout=0.0,
+            norm_first=True
         )
         if variant == 'C':
-            # Ablasi C: tanpa attention. Token langsung diteruskan ke head flatten,
-            # sehingga hanya efek tokenizer + head yang tersisa.
             self.transformer = nn.Identity()
         else:
             self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # 4. Detokenizer + Final MLP
-        # Flatten (B, d_in, d_model) to (B, d_in * d_model) and map to original d_in
-        # We project to dim_t first to maintain network capacity similar to original MLP
+        # 4. Detokenizer + Final Reconstruction Head
         if variant == 'E':
-            # Ablasi E: head per-token. Keluaran fitur ke-j hanya dihitung dari token ke-j
-            # (setelah attention): satu proyeksi linear d_model -> 1 per fitur.
-            self.head_w = nn.Parameter(torch.randn(d_in, d_model) * d_model ** -0.5)
+            self.token_head = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+                nn.Linear(d_model, d_model),
+                nn.SiLU(),
+            )
+            self.head_w = nn.Parameter(torch.randn(d_in, d_model) * (d_model ** -0.5))
             self.head_b = nn.Parameter(torch.zeros(d_in))
-        # Pada varian E, head flatten (out_proj + final_mlp) tidak dibuat sama sekali
-        # agar jumlah parameter dan optimizer tidak memuat bobot yang tidak terpakai.
-        self.out_proj = None if variant == 'E' else nn.Linear(d_in * d_model, dim_t)
-        self.final_mlp = None if variant == 'E' else nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(dim_t, dim_t),
-            nn.SiLU(),
-            nn.Linear(dim_t, d_in),
-        )
+            self.in_proj = None
+            self.out_proj = None
+            self.final_mlp = None
+        else:
+            self.in_proj = nn.Linear(d_in, dim_t)
+            self.out_proj = nn.Linear(d_in * d_model, dim_t)
+            self.final_mlp = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(dim_t, dim_t * 2),
+                nn.SiLU(),
+                nn.Linear(dim_t * 2, dim_t),
+                nn.SiLU(),
+                nn.Linear(dim_t, d_in),
+            )
 
     def forward(self, x, noise_labels, class_labels=None):
+        # =====================================================================
+        # FORWARD PASS: DIFFPUTER ASLI (BASE)
+        # =====================================================================
+        if self.variant == 'base':
+            emb = self.map_noise(noise_labels)
+            emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape)
+            emb = self.time_embed(emb)
+            x = self.proj(x) + emb
+            return self.mlp(x)
+
+        # =====================================================================
+        # FORWARD PASS: MODIFIKASI (VARIAN C, D, E)
+        # =====================================================================
         B = x.shape[0]
         
-        # A. Hitung Waktu (Time Embedding) terlebih dahulu
         emb = self.map_noise(noise_labels)
         emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape)
-        emb = self.time_embed(emb) # Shape: (B, d_model)
+        emb_full = self.time_embed_full(emb)          # Shape: (B, dim_t)
+        emb_token = self.time_embed_token(emb_full)   # Shape: (B, d_model)
         
-        # B. Feature Tokenization (Mencegah mixing fitur)
-        # x is (B, d_in) -> x.unsqueeze(-1) is (B, d_in, 1)
-        # feature_weights is (d_in, d_model)
-        # element-wise multiplication leverages broadcasting -> (B, d_in, d_model)
-        h_tokens = x.unsqueeze(-1) * self.feature_weights + self.feature_biases
+        h_tokens_raw = x.unsqueeze(-1) * self.feature_weights + self.feature_biases
+        h_tokens_in = h_tokens_raw + emb_token.unsqueeze(1)
         
-        # C. Gabungkan waktu SEBELUM attention!
-        # Tambahkan emb (B, d_model) ke semua d_in tokens (B, d_in, d_model)
-        h_tokens = h_tokens + emb.unsqueeze(1)
+        if self.variant == 'C':
+            h_tokens = self.transformer(h_tokens_in)
+        else:
+            h_tokens = h_tokens_in + self.transformer(h_tokens_in)
         
-        # D. Lewatkan ke Transformer Block (Self-Attention)
-        # Perhatian dihitung SECARA SPESIFIK antar kolom/fitur
-        h_tokens = self.transformer(h_tokens)
-        
-        # E. Kembalikan ke bentuk asal dan teruskan ke MLP
         if self.variant == 'E':
-            # (B, d_in, d_model) * (d_in, d_model) -> jumlahkan d_model -> (B, d_in)
-            return (h_tokens * self.head_w).sum(dim=-1) + self.head_b
+            h_tokens_out = self.token_head(h_tokens)
+            return x + (h_tokens_out * self.head_w).sum(dim=-1) + self.head_b
 
-        h_flat = h_tokens.reshape(B, -1) # Shape: (B, d_in * d_model)
-        h = self.out_proj(h_flat) # Shape: (B, dim_t)
-        out = self.final_mlp(h)   # Shape: (B, d_in)
+        h_flat = h_tokens.reshape(B, -1)
+        h = self.out_proj(h_flat) + self.in_proj(x) + emb_full
+        out = self.final_mlp(h)
         
         return out
 

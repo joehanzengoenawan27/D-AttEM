@@ -55,8 +55,8 @@ parser.add_argument('--num_steps', type=int, default=50, help='Number of diffusi
 parser.add_argument('--d_model', type=int, default=32, help='Transformer hidden dimension.')
 parser.add_argument('--nhead', type=int, default=4, help='Number of attention heads.')
 parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer layers.')
-parser.add_argument('--variant', type=str, default='D', choices=['C', 'D', 'E'],
-                    help="Ablation variant: D=current model, C=no attention (flatten head), E=attention + per-token head.")
+parser.add_argument('--variant', type=str, default='D', choices=['base', 'C', 'D', 'E'],
+                    help="Ablation variant: base=original DiffPuter, D=current model, C=no attention, E=per-token head.")
 
 args = parser.parse_args()
 
@@ -277,36 +277,42 @@ if __name__ == '__main__':
         print('in-sample', mae, rmse, 'acc:', acc, 'f1:', f1)
 
         # out-of_sample_imputation
+        if iteration == args.max_iter - 1:
+            rec_Xs = []
 
-        rec_Xs = []
+            for trial in tqdm(range(num_trials), desc='Out-of-sample imputation'):
 
-        for trial in tqdm(range(num_trials), desc='Out-of-sample imputation'):
+                # For out-of-sample imputation, no results from previous iterations are used
 
-            # For out-of-sample imputation, no results from previous iterations are used
+                X_miss = (1. - mask_test.float()) * X_test
+                X_miss = X_miss.to(device)
+                impute_X = X_miss
 
-            X_miss = (1. - mask_test.float()) * X_test
-            X_miss = X_miss.to(device)
-            impute_X = X_miss
+                num_samples, dim = X_test.shape[0], X_test.shape[1]
+                rec_X = impute_mask(net, impute_X, mask_test, num_samples, dim, num_steps, device)
 
-            num_samples, dim = X_test.shape[0], X_test.shape[1]
-            rec_X = impute_mask(net, impute_X, mask_test, num_samples, dim, num_steps, device)
+                mask_int = mask_test.to(torch.float).to(device)
+                rec_X = rec_X * mask_int + impute_X * (1-mask_int)
+                rec_Xs.append(rec_X)
+                
+        
+            rec_X = torch.stack(rec_Xs, dim = 0).mean(0) 
 
-            mask_int = mask_test.to(torch.float).to(device)
-            rec_X = rec_X * mask_int + impute_X * (1-mask_int)
-            rec_Xs.append(rec_X)
+            rec_X = rec_X.cpu().numpy() * 2
+            X_true = X_test.cpu().numpy() * 2
+
+            pred_X = rec_X[:]
+            len_num = train_num.shape[1]
+            res = pred_X[:, len_num:] * std_X[len_num:] + mean_X[len_num:]
+            pred_X[:, len_num:] = res
+
+            mae_out, rmse_out, acc_out, f1_out = get_eval(dataname, pred_X, X_true, test_cat_idx, test_num.shape[1], cat_bin_num, ori_test_mask, oos = True)
+        else:
+            mae_out = 0
+            rmse_out = 0
+            acc_out = 0
+            f1_out = 0
             
-    
-        rec_X = torch.stack(rec_Xs, dim = 0).mean(0) 
-
-        rec_X = rec_X.cpu().numpy() * 2
-        X_true = X_test.cpu().numpy() * 2
-
-        pred_X = rec_X[:]
-        len_num = train_num.shape[1]
-        res = pred_X[:, len_num:] * std_X[len_num:] + mean_X[len_num:]
-        pred_X[:, len_num:] = res
-
-        mae_out, rmse_out, acc_out, f1_out = get_eval(dataname, pred_X, X_true, test_cat_idx, test_num.shape[1], cat_bin_num, ori_test_mask, oos = True)
         MAEs_out.append(mae_out)
         RMSEs_out.append(rmse_out)
         ACCs_out.append(acc_out)
@@ -315,7 +321,8 @@ if __name__ == '__main__':
         result_save_path = os.path.join(ROOT_DIR, 'results', dataname, f'rate{ratio}', mask_type, str(split_idx), f'{num_trials}_{num_steps}{variant_suffix}')
         os.makedirs(result_save_path) if not os.path.exists(result_save_path) else None
 
-        with open (f'{result_save_path}/result.txt', 'a+') as f:
+        write_mode = 'w' if iteration == 0 else 'a+'
+        with open (f'{result_save_path}/result.txt', write_mode) as f:
 
             f.write(f'iteration {iteration}, MAE: in-sample: {mae}, out-of-sample: {mae_out} \n')
             f.write(f'iteration {iteration}, RMSE: in-sample: {rmse}, out-of-sample: {rmse_out} \n')

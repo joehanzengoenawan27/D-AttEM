@@ -518,8 +518,13 @@ def generate_mask(dataname, mask_type, p, mask_num, reproduce=False):
 
         # 1. Cek di awal: jika mask sudah ada dan reproduce=False, langsung lewati
         if os.path.exists(train_mask_path) and os.path.exists(test_mask_path) and not reproduce:
-            print(f'Masks already exist at {train_mask_path}')
-            continue
+            existing_train_mask = np.load(train_mask_path)
+            existing_test_mask = np.load(test_mask_path)
+            if existing_train_mask.shape == train_X.shape and existing_test_mask.shape == test_X.shape:
+                print(f'Masks already exist and shape matches at {train_mask_path}')
+                continue
+            else:
+                print(f'Mask shape mismatch ({existing_train_mask.shape} vs {train_X.shape}), regenerating...')
 
         # 2. Kunci seed sesuai nomor indeks mask (0 s.d. 9)
         np.random.seed(mask_idx)
