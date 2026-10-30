@@ -136,8 +136,9 @@ class MLPDiffusion(nn.Module):
         # CABANG 2: ARSITEKTUR MODIFIKASI (VARIAN C, D, E)
         # =====================================================================
         # 1. Feature Tokenizer
-        self.feature_weights = nn.Parameter(torch.randn(d_in, d_model) * 0.02)
-        self.feature_biases = nn.Parameter(torch.randn(d_in, d_model) * 0.02)
+        init_scale = d_model ** -0.5
+        self.feature_weights = nn.Parameter(torch.randn(d_in, d_model) * init_scale)
+        self.feature_biases = nn.Parameter(torch.randn(d_in, d_model) * init_scale)
 
         # 2. Time Embedding Layers
         self.map_noise = PositionalEmbedding(num_channels=dim_t)
@@ -152,29 +153,30 @@ class MLPDiffusion(nn.Module):
         )
 
         # 3. Transformer Encoder (Self-Attention) dengan Pre-Norm
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=nhead, 
-            dim_feedforward=d_model * 2,
-            batch_first=True,
-            activation='gelu',
-            dropout=0.0,
-            norm_first=True
-        )
         if variant == 'C':
             self.transformer = nn.Identity()
         else:
-            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model, 
+                nhead=nhead, 
+                dim_feedforward=d_model * 2,
+                batch_first=True,
+                activation='gelu',
+                dropout=0.0,
+                norm_first=True
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, norm=nn.LayerNorm(d_model))
+            # Learnable Gate agar kontribusi koresksi Self-Attention masuk secara stabil
+            self.attn_gate = nn.Parameter(torch.tensor(0.1))
         # 4. Detokenizer + Final Reconstruction Head
         if variant == 'E':
             self.token_head = nn.Sequential(
-                nn.LayerNorm(d_model),
+                nn.Linear(d_model, d_model * 2),
                 nn.SiLU(),
-                nn.Linear(d_model, d_model),
+                nn.Linear(d_model * 2, d_model),
                 nn.SiLU(),
             )
-            self.head_w = nn.Parameter(torch.randn(d_in, d_model) * (d_model ** -0.5))
+            self.head_w = nn.Parameter(torch.randn(d_in, d_model) * init_scale)
             self.head_b = nn.Parameter(torch.zeros(d_in))
             self.in_proj = None
             self.out_proj = None
@@ -217,12 +219,15 @@ class MLPDiffusion(nn.Module):
         
         if self.variant == 'C':
             h_tokens = self.transformer(h_tokens_in)
+        elif self.variant == 'D':
+            h_attn = self.transformer(h_tokens_in)
+            h_tokkens = h_tokens_in + self.attn_gate * h_attn
         else:
-            h_tokens = h_tokens_in + self.transformer(h_tokens_in)
-        
-        if self.variant == 'E':
+            # Varian E: Self-Attention + injeksi kembali emb_token setelah LayerNorm
+            h_attm = self.transformer(h_tokens_in)
+            h_tokens = h_tokens_raw + self.attn_gate * h_attn + emb_token.unsqueeze(1)
             h_tokens_out = self.token_head(h_tokens)
-            return x + (h_tokens_out * self.head_w).sum(dim=-1) + self.head_b
+            return (h_tokens_out * self.head_w).sum(sim=-1) + self.head_b        
 
         h_flat = h_tokens.reshape(B, -1)
         h = self.out_proj(h_flat) + self.in_proj(x) + emb_full
@@ -245,7 +250,6 @@ class Precond(nn.Module):
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
         self.sigma_data = sigma_data
-        ###########
         self.denoise_fn_F = denoise_fn
 
     def forward(self, x, sigma):

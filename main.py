@@ -10,17 +10,13 @@ import time
 from tqdm import tqdm
 
 from model import MLPDiffusion, Model
-from dataset import load_dataset, get_eval, mean_std
+from dataset import load_dataset, get_eval, mean_std, save_imputed_dataset
 from diffusion_utils import sample_step, impute_mask
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# =====================================================================
-# TAMBAHAN UNTUK MULTI-GPU: Membantu DataParallel memproses nilai skalar
-# =====================================================================
 class DPWrapper(torch.nn.DataParallel):
     def forward(self, x, sigma, *args, **kwargs):
-        # Jika sigma adalah nilai tunggal (skalar), perbanyak sebanyak jumlah batch
         if isinstance(sigma, torch.Tensor):
             if sigma.dim() == 0:
                 sigma = sigma.unsqueeze(0).expand(x.shape[0])
@@ -37,7 +33,6 @@ class DPWrapper(torch.nn.DataParallel):
 
     def round_sigma(self, sigma):
         return self.module.round_sigma(sigma)
-# =====================================================================
 
 warnings.filterwarnings('ignore')
 
@@ -49,7 +44,7 @@ parser.add_argument('--split_idx', type=int, default=0, help='Split idx.')
 parser.add_argument('--max_iter', type=int, default=5, help='Maximum iteration.')
 parser.add_argument('--ratio', type=str, default=30, help='Masking ratio.')
 parser.add_argument('--hid_dim', type=int, default=1024, help='Hidden dimension.')
-parser.add_argument('--mask', type=str, default='MCAR', help='Masking machenisms.')
+parser.add_argument('--mask', type=str, default='MCAR', help='Masking mechanisms.')
 parser.add_argument('--num_trials', type=int, default=10, help='Number of sampling times.')
 parser.add_argument('--num_steps', type=int, default=50, help='Number of diffusion steps.')
 parser.add_argument('--d_model', type=int, default=32, help='Transformer hidden dimension.')
@@ -111,8 +106,6 @@ if __name__ == '__main__':
     for iteration in range(args.max_iter):
 
         ## M-Step: Density Estimation
-     
-        # Varian D memakai path lama (hasil lama tetap valid); varian lain diberi akhiran _C / _E
         variant_suffix = '' if args.variant == 'D' else f'_{args.variant}'
         ckpt_dir = os.path.join(ROOT_DIR, 'ckpt', dataname, f'rate{ratio}', mask_type, str(split_idx), f'{num_trials}_{num_steps}{variant_suffix}')
         os.makedirs(f'{ckpt_dir}/{iteration}') if not os.path.exists(f'{ckpt_dir}/{iteration}') else None
@@ -129,11 +122,12 @@ if __name__ == '__main__':
             train_data = X_miss
  
         batch_size = 4096
+        # num_workers=0 menghilangkan overhead pembuatan subprocess di setiap epoch
         train_loader = DataLoader(
             train_data,
-            batch_size = batch_size,
-            shuffle = True,
-            num_workers = 4,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
         )
 
         num_epochs = 10000 + 1
@@ -143,21 +137,15 @@ if __name__ == '__main__':
             dim_t=hid_dim, 
             d_model=args.d_model, 
             nhead=args.nhead, 
-            num_layers=args.num_layers, variant=args.variant
+            num_layers=args.num_layers,
+            variant=args.variant
         ).to(device)
 
         if iteration == 0:
             print(denoise_fn)
             print(f'Variant: {args.variant} | Parameters: {sum(p.numel() for p in denoise_fn.parameters()):,}')
 
-        model = Model(denoise_fn = denoise_fn, hid_dim = in_dim).to(device)
-
-                # === TAMBAHAN MULTI-GPU UNTUK TRAINING ===
-        # if torch.cuda.device_count() > 1:
-        #     if iteration == 0: # Print hanya sekali
-        #         print(f"Menggunakan {torch.cuda.device_count()} GPUs untuk Training!")
-        #     model = torch.nn.DataParallel(model)
-        # =========================================
+        model = Model(denoise_fn=denoise_fn, hid_dim=in_dim).to(device)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=0)
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=50)
@@ -167,7 +155,6 @@ if __name__ == '__main__':
         best_loss = float('inf')
         patience = 0
 
-        # progress bar
         pbar = tqdm(range(num_epochs), desc='Training')
         for epoch in pbar:
 
@@ -184,15 +171,16 @@ if __name__ == '__main__':
 
                 optimizer.zero_grad()
                 loss.backward()
+                # Gradient clipping untuk mencegah lonjakan gradien pada Transformer
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
-            curr_loss = batch_loss/len_input
+            curr_loss = batch_loss / len_input
             scheduler.step(curr_loss)
 
             if curr_loss < best_loss:
                 best_loss = curr_loss
                 patience = 0
-                # === MODIFIKASI MULTI-GPU SAVE ===
                 model_to_save = model.module if hasattr(model, 'module') else model
                 torch.save(model_to_save.state_dict(), f'{ckpt_dir}/{iteration}/model.pt')
             else:
@@ -204,17 +192,12 @@ if __name__ == '__main__':
             pbar.set_postfix(loss=curr_loss)
 
             if epoch % 1000 == 0:
-                # === MODIFIKASI MULTI-GPU SAVE ===
                 model_to_save = model.module if hasattr(model, 'module') else model
                 torch.save(model_to_save.state_dict(), f'{ckpt_dir}/{iteration}/model_{epoch}.pt')
 
         end_time = time.time()
 
-    ## E-Step: Missing Value Imputation
-
-        # In-sample imputation
-
-        
+        ## E-Step: Missing Value Imputation
         in_dim = X.shape[1]
 
         denoise_fn = MLPDiffusion(
@@ -222,113 +205,116 @@ if __name__ == '__main__':
             dim_t=hid_dim, 
             d_model=args.d_model, 
             nhead=args.nhead, 
-            num_layers=args.num_layers, variant=args.variant
+            num_layers=args.num_layers,
+            variant=args.variant
         ).to(device)
 
-        model = Model(denoise_fn = denoise_fn, hid_dim = in_dim).to(device)
-        model.load_state_dict(torch.load(f'{ckpt_dir}/{iteration}/model.pt'))
+        model = Model(denoise_fn=denoise_fn, hid_dim=in_dim).to(device)
+        model.load_state_dict(torch.load(f'{ckpt_dir}/{iteration}/model.pt', map_location=device))
         model.eval()
 
         net = model.denoise_fn_D
 
+        # 1. In-sample imputation
         rec_Xs = []
 
         for trial in tqdm(range(num_trials), desc='In-sample imputation'):
-        
             X_miss = (1. - mask_train.float()) * X
             X_miss = X_miss.to(device)
             impute_X = X_miss
-  
-
-            # === TAMBAHAN MULTI-GPU UNTUK IMPUTASI ===
-            # if torch.cuda.device_count() > 1:
-            #     net = DPWrapper(net)
-            # =========================================
             
             num_samples, dim = X.shape[0], X.shape[1]
             rec_X = impute_mask(net, impute_X, mask_train, num_samples, dim, num_steps, device)
+            # Safety clamp mencegah outlier merusak iterasi EM berikutnya
+            rec_X = torch.clamp(rec_X, min=-5.0, max=5.0)
             
             mask_int = mask_train.to(torch.float).to(device)
-            rec_X = rec_X * mask_int + impute_X * (1-mask_int)
+            rec_X = rec_X * mask_int + impute_X * (1 - mask_int)
             rec_Xs.append(rec_X)
-            
-            
 
-        rec_X = torch.stack(rec_Xs, dim = 0).mean(0) 
+        rec_X = torch.stack(rec_Xs, dim=0).mean(0) 
 
         rec_X = rec_X.cpu().numpy() * 2
         X_true = X.cpu().numpy() * 2
 
         np.save(f'{ckpt_dir}/iter_{iteration+1}.npy', rec_X)
 
-        pred_X = rec_X[:]
+        pred_X_train = rec_X.copy()
         len_num = train_num.shape[1]
 
-        res = pred_X[:, len_num:] * std_X[len_num:] + mean_X[len_num:]
-        pred_X[:, len_num:] = res
+        res = pred_X_train[:, len_num:] * std_X[len_num:] + mean_X[len_num:]
+        pred_X_train[:, len_num:] = res
 
-        mae, rmse, acc, f1 = get_eval(dataname, pred_X, X_true, train_cat_idx, train_num.shape[1], cat_bin_num, ori_train_mask)
+        mae, rmse, acc, f1 = get_eval(dataname, pred_X_train, X_true, train_cat_idx, train_num.shape[1], cat_bin_num, ori_train_mask)
         MAEs.append(mae)
         RMSEs.append(rmse)
         ACCs.append(acc)
         F1s.append(f1)
 
-
         print('in-sample', mae, rmse, 'acc:', acc, 'f1:', f1)
 
-        # out-of_sample_imputation
+        result_save_path = os.path.join(ROOT_DIR, 'results', dataname, f'rate{ratio}', mask_type, str(split_idx), f'{num_trials}_{num_steps}{variant_suffix}')
+        os.makedirs(result_save_path) if not os.path.exists(result_save_path) else None
+
+        # 2. Out-of-sample imputation & Penyimpanan Dataset Terimputasi pada Iterasi Terakhir
         if iteration == args.max_iter - 1:
             rec_Xs = []
 
             for trial in tqdm(range(num_trials), desc='Out-of-sample imputation'):
-
-                # For out-of-sample imputation, no results from previous iterations are used
-
                 X_miss = (1. - mask_test.float()) * X_test
                 X_miss = X_miss.to(device)
                 impute_X = X_miss
 
                 num_samples, dim = X_test.shape[0], X_test.shape[1]
                 rec_X = impute_mask(net, impute_X, mask_test, num_samples, dim, num_steps, device)
+                rec_X = torch.clamp(rec_X, min=-5.0, max=5.0)
 
                 mask_int = mask_test.to(torch.float).to(device)
-                rec_X = rec_X * mask_int + impute_X * (1-mask_int)
+                rec_X = rec_X * mask_int + impute_X * (1 - mask_int)
                 rec_Xs.append(rec_X)
-                
         
-            rec_X = torch.stack(rec_Xs, dim = 0).mean(0) 
+            rec_X = torch.stack(rec_Xs, dim=0).mean(0) 
 
             rec_X = rec_X.cpu().numpy() * 2
             X_true = X_test.cpu().numpy() * 2
 
-            pred_X = rec_X[:]
+            pred_X_test = rec_X.copy()
             len_num = train_num.shape[1]
-            res = pred_X[:, len_num:] * std_X[len_num:] + mean_X[len_num:]
-            pred_X[:, len_num:] = res
+            res = pred_X_test[:, len_num:] * std_X[len_num:] + mean_X[len_num:]
+            pred_X_test[:, len_num:] = res
 
-            mae_out, rmse_out, acc_out, f1_out = get_eval(dataname, pred_X, X_true, test_cat_idx, test_num.shape[1], cat_bin_num, ori_test_mask, oos = True)
+            mae_out, rmse_out, acc_out, f1_out = get_eval(dataname, pred_X_test, X_true, test_cat_idx, test_num.shape[1], cat_bin_num, ori_test_mask, oos=True)
+
+            # Simpan dataset train_imputed.csv dan test_imputed.csv untuk evaluasi Downstream Task
+            save_imputed_dataset(
+                dataname=dataname,
+                pred_X_train=pred_X_train,
+                pred_X_test=pred_X_test,
+                mean_X=mean_X,
+                std_X=std_X,
+                num_num=len_num,
+                cat_bin_num=cat_bin_num,
+                ori_train_mask=ori_train_mask,
+                ori_test_mask=ori_test_mask,
+                save_dir=result_save_path
+            )
         else:
-            mae_out = 0
-            rmse_out = 0
-            acc_out = 0
-            f1_out = 0
+            mae_out = 0.0
+            rmse_out = 0.0
+            acc_out = 0.0
+            f1_out = 0.0
             
         MAEs_out.append(mae_out)
         RMSEs_out.append(rmse_out)
         ACCs_out.append(acc_out)
         F1s_out.append(f1_out)
 
-        result_save_path = os.path.join(ROOT_DIR, 'results', dataname, f'rate{ratio}', mask_type, str(split_idx), f'{num_trials}_{num_steps}{variant_suffix}')
-        os.makedirs(result_save_path) if not os.path.exists(result_save_path) else None
-
         write_mode = 'w' if iteration == 0 else 'a+'
-        with open (f'{result_save_path}/result.txt', write_mode) as f:
-
+        with open(f'{result_save_path}/result.txt', write_mode) as f:
             f.write(f'iteration {iteration}, MAE: in-sample: {mae}, out-of-sample: {mae_out} \n')
             f.write(f'iteration {iteration}, RMSE: in-sample: {rmse}, out-of-sample: {rmse_out} \n')
             f.write(f'iteration {iteration}, ACC: in-sample: {acc}, out-of-sample: {acc_out} \n')
             f.write(f'iteration {iteration}, F1: in-sample: {f1}, out-of-sample: {f1_out} \n')
 
         print('out-of-sample', mae_out, rmse_out, 'acc:', acc_out, 'f1:', f1_out)
-
         print(f'saving results to {result_save_path}')
