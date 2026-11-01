@@ -221,13 +221,13 @@ class MLPDiffusion(nn.Module):
             h_tokens = self.transformer(h_tokens_in)
         elif self.variant == 'D':
             h_attn = self.transformer(h_tokens_in)
-            h_tokkens = h_tokens_in + self.attn_gate * h_attn
+            h_tokens = h_tokens_in + self.attn_gate * h_attn
         else:
             # Varian E: Self-Attention + injeksi kembali emb_token setelah LayerNorm
-            h_attm = self.transformer(h_tokens_in)
+            h_attn = self.transformer(h_tokens_in)
             h_tokens = h_tokens_raw + self.attn_gate * h_attn + emb_token.unsqueeze(1)
             h_tokens_out = self.token_head(h_tokens)
-            return (h_tokens_out * self.head_w).sum(sim=-1) + self.head_b        
+            return (h_tokens_out * self.head_w).sum(dim=-1) + self.head_b        
 
         h_flat = h_tokens.reshape(B, -1)
         h = self.out_proj(h_flat) + self.in_proj(x) + emb_full
