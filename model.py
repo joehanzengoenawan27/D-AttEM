@@ -10,9 +10,11 @@ from diffusion_utils import EDMLoss
 
 ModuleType = Union[str, Callable[..., nn.Module]]
 
+
 class SiLU(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
+
 
 class PositionalEmbedding(torch.nn.Module):
     def __init__(self, num_channels, max_positions=10000, endpoint=False):
@@ -22,12 +24,13 @@ class PositionalEmbedding(torch.nn.Module):
         self.endpoint = endpoint
 
     def forward(self, x):
-        freqs = torch.arange(start=0, end=self.num_channels//2, dtype=torch.float32, device=x.device)
+        freqs = torch.arange(start=0, end=self.num_channels // 2, dtype=torch.float32, device=x.device)
         freqs = freqs / (self.num_channels // 2 - (1 if self.endpoint else 0))
         freqs = (1 / self.max_positions) ** freqs
         x = x.ger(freqs.to(x.dtype))
         x = torch.cat([x.cos(), x.sin()], dim=1)
         return x
+
 
 def reglu(x: Tensor) -> Tensor:
     """The ReGLU activation function from [1].
@@ -48,37 +51,16 @@ def geglu(x: Tensor) -> Tensor:
     a, b = x.chunk(2, dim=-1)
     return a * F.gelu(b)
 
+
 class ReGLU(nn.Module):
-    """The ReGLU activation function from [shazeer2020glu].
-
-    Examples:
-        .. testcode::
-
-            module = ReGLU()
-            x = torch.randn(3, 4)
-            assert module(x).shape == (3, 2)
-
-    References:
-        * [shazeer2020glu] Noam Shazeer, "GLU Variants Improve Transformer", 2020
-    """
+    """The ReGLU activation function from [shazeer2020glu]."""
 
     def forward(self, x: Tensor) -> Tensor:
         return reglu(x)
 
 
 class GEGLU(nn.Module):
-    """The GEGLU activation function from [shazeer2020glu].
-
-    Examples:
-        .. testcode::
-
-            module = GEGLU()
-            x = torch.randn(3, 4)
-            assert module(x).shape == (3, 2)
-
-    References:
-        * [shazeer2020glu] Noam Shazeer, "GLU Variants Improve Transformer", 2020
-    """
+    """The GEGLU activation function from [shazeer2020glu]."""
 
     def forward(self, x: Tensor) -> Tensor:
         return geglu(x)
@@ -94,46 +76,63 @@ class FourierEmbedding(torch.nn.Module):
         x = torch.cat([x.cos(), x.sin()], dim=1)
         return x
 
+
 class MLPDiffusion(nn.Module):
     def __init__(self, d_in, dim_t=1024, d_model=32, nhead=4, num_layers=2, variant='D'):
         """
         variant:
-          'base' : Model DiffPuter Asli (Murni MLP tanpa Tokenizer & tanpa Attention)
-          'D'    : Model Modifikasi Utama (Tokenizer + PreNorm Self-Attention + Residual + MLP Head)
-          'C'    : Ablasi C (Tokenizer + MLP Head, TANPA Attention)
-          'E'    : Ablasi E (Tokenizer + PreNorm Self-Attention + Head Per-Token)
+          'base'      : Model DiffPuter Asli (Murni MLP 4-lapis tanpa Tokenizer & tanpa Attention)
+          'base_silu' : Kontrol DiffPuter Asli + Pre-SiLU sebelum MLP 4-lapis
+          'C'         : Ablasi C (Tokenizer + Fusion Pre-SiLU + MLP Ramping 3-lapis, TANPA Attention)
+          'D'         : Model D-AttEM Ramping (Tokenizer + PreNorm Self-Attention + Fusion Pre-SiLU + MLP Ramping 3-lapis)
+          'C.1'       : Ablasi C.1 (Tokenizer + Fusion Pre-SiLU + MLP Penuh 4-lapis, TANPA Attention)
+          'D.1'       : Model D-AttEM Penuh (Tokenizer + PreNorm Self-Attention + Fusion Pre-SiLU + MLP Penuh 4-lapis)
+          'E'         : Ablasi E (Tokenizer + PreNorm Self-Attention + Head Per-Token, TANPA Flatten MLP)
         """
         super().__init__()
         self.d_in = d_in
         self.dim_t = dim_t
         self.d_model = d_model
-        assert variant in ('base', 'C', 'D', 'E'), f"variant harus 'base', 'C', 'D', atau 'E', bukan {variant!r}"
+        valid_variants = ('base', 'base_silu', 'C', 'D', 'C.1', 'D.1', 'E')
+        assert variant in valid_variants, f"variant harus salah satu dari {valid_variants}, bukan {variant!r}"
         self.variant = variant
 
         # =====================================================================
-        # CABANG 1: ARSITEKTUR DIFFPUTER ASLI (BASE)
+        # CABANG 1: ARSITEKTUR DIFFPUTER ASLI (BASE & KONTROL BASE_SILU)
         # =====================================================================
-        if variant == 'base':
+        if variant in ('base', 'base_silu'):
             self.proj = nn.Linear(d_in, dim_t)
-            self.mlp = nn.Sequential(
-                nn.Linear(dim_t, dim_t * 2),
-                nn.SiLU(),
-                nn.Linear(dim_t * 2, dim_t * 2),
-                nn.SiLU(),
-                nn.Linear(dim_t * 2, dim_t),
-                nn.SiLU(),
-                nn.Linear(dim_t, d_in),
-            )
+            if variant == 'base':
+                self.mlp = nn.Sequential(
+                    nn.Linear(dim_t, dim_t * 2),
+                    nn.SiLU(),
+                    nn.Linear(dim_t * 2, dim_t * 2),
+                    nn.SiLU(),
+                    nn.Linear(dim_t * 2, dim_t),
+                    nn.SiLU(),
+                    nn.Linear(dim_t, d_in),
+                )
+            else:
+                self.mlp = nn.Sequential(
+                    nn.SiLU(),
+                    nn.Linear(dim_t, dim_t * 2),
+                    nn.SiLU(),
+                    nn.Linear(dim_t * 2, dim_t * 2),
+                    nn.SiLU(),
+                    nn.Linear(dim_t * 2, dim_t),
+                    nn.SiLU(),
+                    nn.Linear(dim_t, d_in),
+                )
             self.map_noise = PositionalEmbedding(num_channels=dim_t)
             self.time_embed = nn.Sequential(
                 nn.Linear(dim_t, dim_t),
                 nn.SiLU(),
-                nn.Linear(dim_t, dim_t)
+                nn.Linear(dim_t, dim_t),
             )
             return
 
         # =====================================================================
-        # CABANG 2: ARSITEKTUR MODIFIKASI (VARIAN C, D, E)
+        # CABANG 2: ARSITEKTUR MODIFIKASI (VARIAN C, D, C.1, D.1, E)
         # =====================================================================
         # 1. Feature Tokenizer
         init_scale = d_model ** -0.5
@@ -153,21 +152,27 @@ class MLPDiffusion(nn.Module):
         )
 
         # 3. Transformer Encoder (Self-Attention) dengan Pre-Norm
-        if variant == 'C':
+        if variant in ('C', 'C.1'):
             self.transformer = nn.Identity()
+            self.attn_gate = None
         else:
             encoder_layer = nn.TransformerEncoderLayer(
-                d_model=d_model, 
-                nhead=nhead, 
+                d_model=d_model,
+                nhead=nhead,
                 dim_feedforward=d_model * 2,
                 batch_first=True,
                 activation='gelu',
                 dropout=0.0,
-                norm_first=True
+                norm_first=True,
             )
-            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, norm=nn.LayerNorm(d_model))
-            # Learnable Gate agar kontribusi koresksi Self-Attention masuk secara stabil
+            self.transformer = nn.TransformerEncoder(
+                encoder_layer,
+                num_layers=num_layers,
+                norm=nn.LayerNorm(d_model),
+            )
+            # Learnable Gate agar kontribusi koreksi Self-Attention masuk secara stabil
             self.attn_gate = nn.Parameter(torch.tensor(0.1))
+
         # 4. Detokenizer + Final Reconstruction Head
         if variant == 'E':
             self.token_head = nn.Sequential(
@@ -181,7 +186,8 @@ class MLPDiffusion(nn.Module):
             self.in_proj = None
             self.out_proj = None
             self.final_mlp = None
-        else:
+        elif variant in ('C', 'D'):
+            # Dekoder MLP Ramping 3-Lapis (Konsisten dengan DAttEM3 & DAttEM4)
             self.in_proj = nn.Linear(d_in, dim_t)
             self.out_proj = nn.Linear(d_in * d_model, dim_t)
             self.final_mlp = nn.Sequential(
@@ -192,12 +198,26 @@ class MLPDiffusion(nn.Module):
                 nn.SiLU(),
                 nn.Linear(dim_t, d_in),
             )
+        else:
+            # Varian C.1 dan D.1: Dekoder MLP Penuh 4-Lapis (Konsisten penuh dengan C/D + Lapisan 2048->2048)
+            self.in_proj = nn.Linear(d_in, dim_t)
+            self.out_proj = nn.Linear(d_in * d_model, dim_t)
+            self.final_mlp = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(dim_t, dim_t * 2),
+                nn.SiLU(),
+                nn.Linear(dim_t * 2, dim_t * 2),
+                nn.SiLU(),
+                nn.Linear(dim_t * 2, dim_t),
+                nn.SiLU(),
+                nn.Linear(dim_t, d_in),
+            )
 
     def forward(self, x, noise_labels, class_labels=None):
         # =====================================================================
-        # FORWARD PASS: DIFFPUTER ASLI (BASE)
+        # FORWARD PASS: DIFFPUTER ASLI (BASE & BASE_SILU)
         # =====================================================================
-        if self.variant == 'base':
+        if self.variant in ('base', 'base_silu'):
             emb = self.map_noise(noise_labels)
             emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape)
             emb = self.time_embed(emb)
@@ -205,21 +225,21 @@ class MLPDiffusion(nn.Module):
             return self.mlp(x)
 
         # =====================================================================
-        # FORWARD PASS: MODIFIKASI (VARIAN C, D, E)
+        # FORWARD PASS: MODIFIKASI (VARIAN C, D, C.1, D.1, E)
         # =====================================================================
         B = x.shape[0]
-        
+
         emb = self.map_noise(noise_labels)
         emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape)
         emb_full = self.time_embed_full(emb)          # Shape: (B, dim_t)
         emb_token = self.time_embed_token(emb_full)   # Shape: (B, d_model)
-        
+
         h_tokens_raw = x.unsqueeze(-1) * self.feature_weights + self.feature_biases
         h_tokens_in = h_tokens_raw + emb_token.unsqueeze(1)
-        
-        if self.variant == 'C':
+
+        if self.variant in ('C', 'C.1'):
             h_tokens = self.transformer(h_tokens_in)
-        elif self.variant == 'D':
+        elif self.variant in ('D', 'D.1'):
             h_attn = self.transformer(h_tokens_in)
             h_tokens = h_tokens_in + self.attn_gate * h_attn
         else:
@@ -227,22 +247,23 @@ class MLPDiffusion(nn.Module):
             h_attn = self.transformer(h_tokens_in)
             h_tokens = h_tokens_raw + self.attn_gate * h_attn + emb_token.unsqueeze(1)
             h_tokens_out = self.token_head(h_tokens)
-            return (h_tokens_out * self.head_w).sum(dim=-1) + self.head_b        
+            return (h_tokens_out * self.head_w).sum(dim=-1) + self.head_b
 
         h_flat = h_tokens.reshape(B, -1)
         h = self.out_proj(h_flat) + self.in_proj(x) + emb_full
         out = self.final_mlp(h)
-        
+
         return out
 
 
 class Precond(nn.Module):
-    def __init__(self,
+    def __init__(
+        self,
         denoise_fn,
         hid_dim,
-        sigma_min = 0,                # Minimum supported noise level.
-        sigma_max = float('inf'),     # Maximum supported noise level.
-        sigma_data = 0.5,              # Expected standard deviation of the training data.
+        sigma_min=0,                # Minimum supported noise level.
+        sigma_max=float('inf'),     # Maximum supported noise level.
+        sigma_data=0.5,             # Expected standard deviation of the training data.
     ):
         super().__init__()
 
@@ -253,7 +274,6 @@ class Precond(nn.Module):
         self.denoise_fn_F = denoise_fn
 
     def forward(self, x, sigma):
-
         x = x.to(torch.float32)
 
         sigma = sigma.to(torch.float32).reshape(-1, 1)
@@ -273,16 +293,15 @@ class Precond(nn.Module):
 
     def round_sigma(self, sigma):
         return torch.as_tensor(sigma)
-    
+
 
 class Model(nn.Module):
-    def __init__(self, denoise_fn, hid_dim, P_mean=-1.2, P_std=1.2, sigma_data=0.5, gamma=5, opts=None, pfgmpp = False):
+    def __init__(self, denoise_fn, hid_dim, P_mean=-1.2, P_std=1.2, sigma_data=0.5, gamma=5, opts=None, pfgmpp=False):
         super().__init__()
 
         self.denoise_fn_D = Precond(denoise_fn, hid_dim)
         self.loss_fn = EDMLoss(P_mean, P_std, sigma_data, hid_dim=hid_dim, gamma=5, opts=None)
 
     def forward(self, x):
-
         loss = self.loss_fn(self.denoise_fn_D, x)
         return loss.mean(-1).mean()
