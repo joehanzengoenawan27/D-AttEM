@@ -72,7 +72,7 @@ args = parser.parse_args()
 # check cuda
 if args.gpu != -1 and torch.cuda.is_available():
     args.device = f'cuda:{args.gpu}'
-    print(f"Menggunakan GPU: {args.device}")
+    print("Menggunakan GPU!")
 else:
     args.device = 'cpu'
     print("Menggunakan CPU!")
@@ -141,7 +141,8 @@ if __name__ == '__main__':
         ## M-Step: Density Estimation
         os.makedirs(f'{ckpt_dir}/{iteration}', exist_ok=True)
 
-        print(f'iteration: {iteration} | variant: {args.variant} | split: {split_idx}')
+        # Pertahankan format cetak 'iteration: {iteration}' agar kompatibel dengan parser log Blok 3
+        print(f'iteration: {iteration}')
         print(ckpt_dir)
 
         if iteration == 0:
@@ -223,7 +224,7 @@ if __name__ == '__main__':
                 patience += 1
                 if patience == 500:
                     stopped_epoch = epoch
-                    print(f'Early stopping at epoch {epoch}')
+                    print('Early stopping')
                     break
 
             pbar.set_postfix(loss=curr_loss)
@@ -359,12 +360,16 @@ if __name__ == '__main__':
         F1s_out.append(f1_out)
 
         write_mode = 'w' if iteration == 0 else 'a+'
+        # Pertahankan result.txt murni 4 baris per iterasi agar 100% kompatibel dengan Blok 3 (base_idx = it * 4)
         with open(f'{result_save_path}/result.txt', write_mode) as f:
             f.write(f'iteration {iteration}, MAE: in-sample: {mae}, out-of-sample: {mae_out} \n')
             f.write(f'iteration {iteration}, RMSE: in-sample: {rmse}, out-of-sample: {rmse_out} \n')
             f.write(f'iteration {iteration}, ACC: in-sample: {acc}, out-of-sample: {acc_out} \n')
             f.write(f'iteration {iteration}, F1: in-sample: {f1}, out-of-sample: {f1_out} \n')
-            f.write(
+
+        # Simpan rincian waktu per iterasi ke runtime.txt terpisah di folder hasil yang sama
+        with open(f'{result_save_path}/runtime.txt', write_mode) as rf:
+            rf.write(
                 f'iteration {iteration}, TIME: total={iter_total_sec:.2f}s ({format_hms(iter_total_sec)}) '
                 f'| M-Step={m_step_sec:.2f}s (epoch={stopped_epoch}) | E-In={e_in_sec:.2f}s | E-Out={e_out_sec:.2f}s\n'
             )
@@ -375,12 +380,13 @@ if __name__ == '__main__':
 
     total_mask_sec = time.time() - mask_start_time
     runtime_log["total_mask_sec"] = round(total_mask_sec, 2)
+    runtime_log["total_mask_min"] = round(total_mask_sec / 60.0, 2)
     runtime_log["total_mask_hms"] = format_hms(total_mask_sec)
 
-    with open(f'{result_save_path}/result.txt', 'a+') as f:
-        f.write(f'TOTAL_MASK_RUNTIME: {total_mask_sec:.2f}s ({format_hms(total_mask_sec)}) | Parameters: {runtime_log["num_params"]}\n')
+    with open(f'{result_save_path}/runtime.txt', 'a+') as rf:
+        rf.write(f'TOTAL_MASK_RUNTIME: {total_mask_sec:.2f}s ({total_mask_sec/60.0:.2f} min / {format_hms(total_mask_sec)}) | Parameters: {runtime_log["num_params"]}\n')
 
-    with open(f'{result_save_path}/runtime.json', 'w') as f:
-        json.dump(runtime_log, f, indent=2)
+    with open(f'{result_save_path}/runtime.json', 'w') as jf:
+        json.dump(runtime_log, jf, indent=2)
 
     print(f'Total mask runtime ({args.variant}, split {split_idx}): {format_hms(total_mask_sec)}')
